@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python3 generator/generate_synthetic_data.py)",
-      "Bash(psql *)"
-    ]
-  }
-}
