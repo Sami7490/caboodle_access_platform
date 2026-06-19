@@ -1,0 +1,12 @@
+version: 2
+
+sources:
+  - name: raw_caboodle
+    schema: raw
+    tables:
+      - name: patient_dim
+      - name: department_dim
+      - name: provider_dim
+      - name: encounter_fact
+      - name: appointment_fact
+      - name: date_dim

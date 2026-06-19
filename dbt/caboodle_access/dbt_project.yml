@@ -1,0 +1,30 @@
+# Name of this dbt project.
+name: 'caboodle_access'
+version: '1.0.0'
+
+# Which profile (connection details) in ~/.dbt/profiles.yml this project uses.
+profile: 'caboodle_access'
+
+# Where dbt looks for each file type within this project.
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# Model configuration -- our raw -> staging -> marts layering.
+# Models inside models/staging/ become VIEWs.
+# Models inside models/marts/ become TABLEs.
+models:
+  caboodle_access:
+    staging:
+      +schema: staging
+      +materialized: view
+    marts:
+      +schema: marts
+      +materialized: table
