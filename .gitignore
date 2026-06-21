@@ -1,14 +1,32 @@
 # Python
 __pycache__/
 *.pyc
-.venv/
-venv/
+*.pyo
+.Python
+*.egg-info/
+
+# Environment
+.env
+*.env
+
+# Model files (large binaries -- regenerate locally)
+agent/*.pkl
 
 # dbt
-target/
-dbt_packages/
-logs/
+dbt/caboodle_access/target/
+dbt/caboodle_access/dbt_packages/
+dbt/caboodle_access/logs/
 
-# macOS
+# Airflow
+airflow/logs/
+~/airflow/
+
+# Streamlit
+.streamlit/
+
+# Mac
 .DS_Store
-.claude/settings.local.json
+
+# API keys -- never commit these
+*api_key*
+*secret*
