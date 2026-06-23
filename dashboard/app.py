@@ -82,6 +82,7 @@ section = st.sidebar.radio(
         "🤖 AI Query Assistant",
         "📋 LLM Observability",
         "⚙️ Prompt Management",
+        "🧪 Data Quality",
     ]
 )
 
@@ -380,7 +381,88 @@ elif section == "🤖 AI Query Assistant":
                 st.session_state.messages.append({"role": "assistant", "content": answer})
 
 # ----------------------------------------------------------------------------
-# SECTION 7: PROMPT MANAGEMENT
+# SECTION 7: DATA QUALITY MONITORING
+# ----------------------------------------------------------------------------
+
+elif section == "🧪 Data Quality":
+    st.title("🧪 Data Quality Monitoring")
+    st.markdown(
+        "Tracks dbt test results over time — every time `run_dbt_tests.py` "
+        "runs, results are logged to `raw.dbt_test_results`. This gives a "
+        "trend view of data quality rather than a single point-in-time snapshot."
+    )
+
+    # Summary metrics from latest run
+    latest_df = run_query("""
+        SELECT status, COUNT(*) AS count
+        FROM raw.dbt_test_results
+        WHERE run_at = (SELECT MAX(run_at) FROM raw.dbt_test_results)
+        GROUP BY status
+    """)
+
+    col1, col2, col3 = st.columns(3)
+    passed = int(latest_df[latest_df['status'] == 'pass']['count'].sum()) if not latest_df.empty else 0
+    failed = int(latest_df[latest_df['status'] == 'fail']['count'].sum()) if not latest_df.empty else 0
+    warned = int(latest_df[latest_df['status'] == 'warn']['count'].sum()) if not latest_df.empty else 0
+
+    with col1:
+        st.metric("✅ Passing", passed)
+    with col2:
+        st.metric("❌ Failing", failed, delta=None if failed == 0 else f"{failed} failures", delta_color="inverse")
+    with col3:
+        st.metric("⚠️ Warnings", warned)
+
+    st.divider()
+
+    # Latest run results
+    st.subheader("Latest Run Results")
+    results_df = run_query("""
+        SELECT test_name, status, failures, run_at
+        FROM raw.dbt_test_results
+        WHERE run_at = (SELECT MAX(run_at) FROM raw.dbt_test_results)
+        ORDER BY status DESC, test_name
+    """)
+    st.dataframe(results_df, use_container_width=True)
+
+    st.divider()
+
+    # Pass rate trend over time
+    st.subheader("Pass Rate Trend Over Time")
+    trend_df = run_query("""
+        SELECT
+            run_at,
+            COUNT(*) AS total_tests,
+            SUM(CASE WHEN status = 'pass' THEN 1 ELSE 0 END) AS passed,
+            ROUND(100.0 * SUM(CASE WHEN status = 'pass' THEN 1 ELSE 0 END) / COUNT(*), 1)
+                AS pass_rate_pct
+        FROM raw.dbt_test_results
+        GROUP BY run_at
+        ORDER BY run_at
+    """)
+    if len(trend_df) > 1:
+        fig = px.line(trend_df, x='run_at', y='pass_rate_pct',
+                      markers=True,
+                      labels={'pass_rate_pct': 'Pass Rate (%)', 'run_at': 'Run Time'},
+                      title="dbt Test Pass Rate Over Time")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Run `python3 airflow/run_dbt_tests.py` a few more times to see a trend chart here.")
+
+    st.divider()
+
+    # Full history
+    st.subheader("Full Test History")
+    history_df = run_query("""
+        SELECT test_name, status, failures, run_at
+        FROM raw.dbt_test_results
+        ORDER BY run_at DESC
+        LIMIT 100
+    """)
+    st.dataframe(history_df, use_container_width=True)
+
+
+# ----------------------------------------------------------------------------
+# SECTION 8: PROMPT MANAGEMENT
 # ----------------------------------------------------------------------------
 
 elif section == "⚙️ Prompt Management":
