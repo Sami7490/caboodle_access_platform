@@ -84,6 +84,7 @@ section = st.sidebar.radio(
         "⚙️ Prompt Management",
         "🧪 Data Quality",
         "👥 Patient Cohort Builder",
+        "🔮 What-If Simulator",
     ]
 )
 
@@ -382,7 +383,195 @@ elif section == "🤖 AI Query Assistant":
                 st.session_state.messages.append({"role": "assistant", "content": answer})
 
 # ----------------------------------------------------------------------------
-# SECTION 7: PATIENT COHORT BUILDER
+# SECTION 7: WHAT-IF SIMULATOR
+# ----------------------------------------------------------------------------
+
+elif section == "🔮 What-If Simulator":
+    st.title("🔮 What-If Simulator")
+    st.markdown(
+        "Adjust hypothetical patient and appointment parameters and see how "
+        "the ML model's predicted risk scores change in real time. Built on "
+        "the same scikit-learn models trained in Phase 2."
+    )
+
+    tab1, tab2 = st.tabs(["No-Show Risk Simulator", "Readmission Risk Simulator"])
+
+    # ----------------------------------------------------------------
+    # TAB 1: NO-SHOW RISK SIMULATOR
+    # ----------------------------------------------------------------
+    with tab1:
+        st.subheader("No-Show Risk Simulator")
+        st.markdown("Adjust appointment parameters to see how predicted no-show probability changes.")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            lead_time = st.slider(
+                "Lead time (days between booking and appointment)",
+                min_value=1, max_value=90, value=14,
+                help="Longer lead times are associated with higher no-show risk"
+            )
+            appt_type = st.selectbox(
+                "Appointment type",
+                ["New Patient", "Follow-up", "Annual Wellness", "Procedure", "Therapy Session"]
+            )
+            day_of_week = st.selectbox(
+                "Day of week",
+                ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+            )
+
+        with col2:
+            is_weekend = day_of_week in ["Saturday", "Sunday"]
+            prior_noshow = st.slider(
+                "Patient's prior no-show count",
+                min_value=0, max_value=10, value=0,
+                help="How many times has this patient previously no-showed?"
+            )
+            prior_appts = st.slider(
+                "Patient's total prior appointments",
+                min_value=0, max_value=20, value=5
+            )
+
+        # Score the hypothetical appointment using our trained no-show model.
+        try:
+            import joblib, pandas as pd
+            noshow_model   = joblib.load("agent/noshow_model.pkl")
+            noshow_scaler  = joblib.load("agent/noshow_scaler.pkl")
+            noshow_features = joblib.load("agent/noshow_features.pkl")
+
+            # Build a single-row feature dataframe matching the training schema.
+            input_df = pd.DataFrame([{
+                "lead_time_days": float(lead_time),
+                "is_weekend": is_weekend,
+                "prior_noshow_count": float(prior_noshow),
+                "prior_appt_count": float(prior_appts),
+                "appointment_type": appt_type,
+                "day_of_week": day_of_week,
+            }])
+            input_df = pd.get_dummies(input_df, columns=["appointment_type", "day_of_week"], drop_first=True)
+            for col in noshow_features:
+                if col not in input_df.columns:
+                    input_df[col] = 0
+            input_df = input_df[noshow_features].fillna(0)
+            scaled = noshow_scaler.transform(input_df)
+            prob = float(noshow_model.predict_proba(scaled)[0][1])
+
+            # Display the result prominently.
+            st.divider()
+            risk_level = "🔴 High" if prob > 0.4 else "🟡 Medium" if prob > 0.2 else "🟢 Low"
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Predicted No-Show Probability", f"{prob:.1%}")
+            with col2:
+                st.metric("Risk Level", risk_level)
+
+            # Show a gauge-style progress bar.
+            st.progress(min(prob, 1.0), text=f"No-show probability: {prob:.1%}")
+
+            # Key drivers narrative
+            st.markdown("**Key factors in this prediction:**")
+            drivers = []
+            if lead_time > 30:
+                drivers.append(f"• Long lead time ({lead_time} days) increases no-show risk")
+            if prior_noshow > 0:
+                drivers.append(f"• Prior no-show history ({prior_noshow} previous no-shows) is a strong predictor")
+            if is_weekend:
+                drivers.append("• Weekend appointments have higher no-show rates")
+            if appt_type == "New Patient":
+                drivers.append("• New patient appointments tend to have higher no-show rates")
+            if not drivers:
+                drivers.append("• No strong risk factors identified for this combination")
+            for d in drivers:
+                st.markdown(d)
+
+        except Exception as e:
+            st.error(f"Model scoring error: {e}")
+
+    # ----------------------------------------------------------------
+    # TAB 2: READMISSION RISK SIMULATOR
+    # ----------------------------------------------------------------
+    with tab2:
+        st.subheader("Readmission Risk Simulator")
+        st.markdown("Adjust inpatient encounter parameters to see predicted 30-day readmission probability.")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            los = st.slider(
+                "Length of stay (days)",
+                min_value=1, max_value=30, value=3,
+                help="Longer stays often indicate higher acuity and readmission risk"
+            )
+            disposition = st.selectbox(
+                "Discharge disposition",
+                ["Home", "Home Health", "SNF", "AMA", "Expired"]
+            )
+
+        with col2:
+            age = st.slider("Patient age (years)", min_value=0, max_value=18, value=8)
+            prior_admissions = st.slider(
+                "Prior inpatient admissions",
+                min_value=0, max_value=10, value=0,
+                help="Previous admissions are a strong predictor of readmission"
+            )
+            dept_key = st.selectbox(
+                "Department",
+                [6, 7],
+                format_func=lambda x: "Pediatric Inpatient Unit" if x == 6 else "Pediatric ICU"
+            )
+
+        # Score the hypothetical encounter using our trained readmission model.
+        try:
+            readmit_model    = joblib.load("agent/readmission_model.pkl")
+            readmit_scaler   = joblib.load("agent/readmission_scaler.pkl")
+            readmit_features = joblib.load("agent/readmission_features.pkl")
+
+            input_df = pd.DataFrame([{
+                "length_of_stay_days": float(los),
+                "age_years": float(age),
+                "prior_admission_count": float(prior_admissions),
+                f"department_key_{dept_key}": 1,
+                "discharge_disposition": disposition,
+            }])
+            input_df = pd.get_dummies(input_df, columns=["discharge_disposition"], drop_first=True)
+            for col in readmit_features:
+                if col not in input_df.columns:
+                    input_df[col] = 0
+            input_df = input_df[readmit_features].fillna(0)
+            scaled = readmit_scaler.transform(input_df)
+            prob = float(readmit_model.predict_proba(scaled)[0][1])
+
+            st.divider()
+            risk_level = "🔴 High" if prob > 0.4 else "🟡 Medium" if prob > 0.2 else "🟢 Low"
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Predicted Readmission Probability", f"{prob:.1%}")
+            with col2:
+                st.metric("Risk Level", risk_level)
+
+            st.progress(min(prob, 1.0), text=f"Readmission probability: {prob:.1%}")
+
+            st.markdown("**Key factors in this prediction:**")
+            drivers = []
+            if los > 5:
+                drivers.append(f"• Long length of stay ({los} days) suggests higher acuity")
+            if disposition in ["AMA", "SNF"]:
+                drivers.append(f"• Discharge to {disposition} is associated with higher readmission risk")
+            if prior_admissions > 1:
+                drivers.append(f"• {prior_admissions} prior admissions indicates a high-utilization patient")
+            if dept_key == 7:
+                drivers.append("• ICU discharge carries elevated readmission risk")
+            if not drivers:
+                drivers.append("• No strong risk factors identified for this combination")
+            for d in drivers:
+                st.markdown(d)
+
+        except Exception as e:
+            st.error(f"Model scoring error: {e}")
+
+
+# ----------------------------------------------------------------------------
+# SECTION 8: PATIENT COHORT BUILDER
 # ----------------------------------------------------------------------------
 
 elif section == "👥 Patient Cohort Builder":
