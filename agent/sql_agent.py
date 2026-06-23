@@ -46,6 +46,41 @@ def get_db_connection():
         dbname="caboodle_access", user="postgres"
     )
 
+
+def get_system_prompt(prompt_name: str = "agent_system_prompt") -> str:
+    """
+    Loads the active system prompt from raw.prompt_library (our prompt
+    management table in Postgres) rather than using a hardcoded string.
+
+    This is the prompt management pattern: storing prompts in a database
+    means you can edit, version, and swap them without touching code,
+    restart the app, or redeploying anything. It also gives you a full
+    audit trail of every prompt change via the version and updated_at
+    columns.
+
+    Falls back to a safe default if the table or prompt name is not found,
+    so the agent never crashes just because of a missing prompt.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT prompt_text FROM raw.prompt_library
+               WHERE prompt_name = %s AND is_active = TRUE
+               ORDER BY version DESC LIMIT 1""",
+            (prompt_name,)
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row:
+            return row[0]
+    except Exception as e:
+        print(f"[PROMPT MANAGER] Failed to load prompt '{prompt_name}': {e}")
+
+    # Safe fallback if database lookup fails.
+    return "You are a clinical analytics assistant. Answer questions about the database accurately and concisely."
+
 # ----------------------------------------------------------------------------
 # OBSERVABILITY: log every Claude API call to the database
 # ----------------------------------------------------------------------------
@@ -369,12 +404,10 @@ def run_agent(user_question: str, api_key: str) -> str:
     """
     client = anthropic.Anthropic(api_key=api_key)
 
-    system_prompt = """You are a clinical analytics assistant for a pediatric hospital.
-You have access to tools that let you query a database of patient appointments,
-encounters, and readmissions, and retrieve ML-generated risk scores for individual
-patients. Answer questions accurately and concisely. When querying the database,
-always use fully qualified table names (e.g. analytics_marts.fact_appointments).
-When presenting numbers, round percentages to one decimal place."""
+    # Load the system prompt from raw.prompt_library (our prompt management
+    # table) rather than using a hardcoded string -- this lets us edit,
+    # version, and swap prompts without touching code.
+    system_prompt = get_system_prompt("agent_system_prompt")
 
     messages = [{"role": "user", "content": user_question}]
 

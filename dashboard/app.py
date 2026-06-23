@@ -81,6 +81,7 @@ section = st.sidebar.radio(
         "🔍 Semantic Note Search",
         "🤖 AI Query Assistant",
         "📋 LLM Observability",
+        "⚙️ Prompt Management",
     ]
 )
 
@@ -379,7 +380,82 @@ elif section == "🤖 AI Query Assistant":
                 st.session_state.messages.append({"role": "assistant", "content": answer})
 
 # ----------------------------------------------------------------------------
-# SECTION 7: LLM OBSERVABILITY
+# SECTION 7: PROMPT MANAGEMENT
+# ----------------------------------------------------------------------------
+
+elif section == "⚙️ Prompt Management":
+    st.title("⚙️ Prompt Management")
+    st.markdown(
+        "Edit and version the Claude agent's system prompt directly from the "
+        "dashboard -- no code changes or restarts needed. Every change is versioned "
+        "in raw.prompt_library (our prompt management table in Postgres)."
+    )
+
+    # Show current active prompt
+    current_df = run_query("""
+        SELECT prompt_name, version, prompt_text, updated_at, notes
+        FROM raw.prompt_library
+        WHERE is_active = TRUE
+        ORDER BY prompt_name
+    """)
+
+    st.subheader("Active Prompts")
+    for _, row in current_df.iterrows():
+        with st.expander(f"{row['prompt_name']} (v{row['version']}) — last updated {str(row['updated_at'])[:16]}"):
+            st.text_area("Current prompt text", value=row['prompt_text'], height=150, disabled=True,
+                        key=f"current_{row['prompt_name']}")
+            if row['notes']:
+                st.caption(f"Notes: {row['notes']}")
+
+    st.divider()
+    st.subheader("Edit a Prompt")
+
+    prompt_names = current_df['prompt_name'].tolist()
+    selected = st.selectbox("Select prompt to edit", prompt_names)
+
+    if selected:
+        current_row = current_df[current_df['prompt_name'] == selected].iloc[0]
+        new_text = st.text_area(
+            "New prompt text",
+            value=current_row['prompt_text'],
+            height=200,
+            key="edit_prompt"
+        )
+        edit_notes = st.text_input("Notes (why are you changing this?)", placeholder="e.g. Added instruction to always cite table names")
+
+        if st.button("Save new version"):
+            conn = get_connection()
+            cur = conn.cursor()
+            # Deactivate current version
+            cur.execute(
+                "UPDATE raw.prompt_library SET is_active = FALSE WHERE prompt_name = %s",
+                (selected,)
+            )
+            # Insert new version
+            cur.execute(
+                """INSERT INTO raw.prompt_library
+                   (prompt_name, prompt_text, version, is_active, notes)
+                   VALUES (%s, %s, %s, TRUE, %s)""",
+                (selected, new_text, int(current_row['version']) + 1, edit_notes)
+            )
+            conn.commit()
+            cur.close()
+            st.success(f"Saved v{int(current_row['version']) + 1} of '{selected}'. Agent will use new prompt on next query.")
+            st.cache_data.clear()
+
+    st.divider()
+    st.subheader("Version History")
+    history_df = run_query("""
+        SELECT prompt_name, version, is_active, updated_at, notes,
+               LEFT(prompt_text, 80) AS prompt_preview
+        FROM raw.prompt_library
+        ORDER BY prompt_name, version DESC
+    """)
+    st.dataframe(history_df, use_container_width=True)
+
+
+# ----------------------------------------------------------------------------
+# SECTION 8: LLM OBSERVABILITY
 # ----------------------------------------------------------------------------
 
 elif section == "📋 LLM Observability":
