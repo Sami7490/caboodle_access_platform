@@ -83,6 +83,7 @@ section = st.sidebar.radio(
         "📋 LLM Observability",
         "⚙️ Prompt Management",
         "🧪 Data Quality",
+        "👥 Patient Cohort Builder",
     ]
 )
 
@@ -381,7 +382,179 @@ elif section == "🤖 AI Query Assistant":
                 st.session_state.messages.append({"role": "assistant", "content": answer})
 
 # ----------------------------------------------------------------------------
-# SECTION 7: DATA QUALITY MONITORING
+# SECTION 7: PATIENT COHORT BUILDER
+# ----------------------------------------------------------------------------
+
+elif section == "👥 Patient Cohort Builder":
+    st.title("👥 Patient Cohort Builder")
+    st.markdown(
+        "Filter patients by demographics and clinical characteristics to see "
+        "aggregate metrics for that cohort. Useful for identifying high-risk "
+        "subpopulations and targeting interventions."
+    )
+
+    # --- FILTERS ---
+    st.subheader("Define Cohort")
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        age_range = st.slider("Age range (years)", 0, 18, (0, 18))
+        sex_filter = st.multiselect("Sex", ["Male", "Female"], default=["Male", "Female"])
+
+    with col2:
+        language_filter = st.multiselect(
+            "Primary language",
+            ["English", "Spanish", "Other"],
+            default=["English", "Spanish", "Other"]
+        )
+        race_options = run_query("SELECT DISTINCT race FROM analytics_marts.dim_patients ORDER BY race")
+        race_filter = st.multiselect(
+            "Race",
+            race_options['race'].tolist(),
+            default=race_options['race'].tolist()
+        )
+
+    with col3:
+        dept_options = run_query("SELECT DISTINCT department_name FROM analytics_staging.stg_departments ORDER BY department_name")
+        dept_filter = st.multiselect(
+            "Department (appointment history)",
+            dept_options['department_name'].tolist(),
+            default=dept_options['department_name'].tolist()
+        )
+
+    # Build the cohort query dynamically from the selected filters.
+    # We use Python to construct the WHERE clause based on what the
+    # user selected, then pass it to Postgres via run_query().
+    sex_list = "', '".join(sex_filter) if sex_filter else "''"
+    lang_list = "', '".join(language_filter) if language_filter else "''"
+    race_list = "', '".join(race_filter) if race_filter else "''"
+    dept_list = "', '".join(dept_filter) if dept_filter else "''"
+
+    cohort_query = f"""
+        SELECT DISTINCT p.patient_key
+        FROM analytics_marts.dim_patients p
+        JOIN analytics_marts.fact_appointments fa ON fa.patient_key = p.patient_key
+        JOIN analytics_staging.stg_departments d ON d.department_key = fa.department_key
+        WHERE p.age_years BETWEEN {age_range[0]} AND {age_range[1]}
+          AND p.sex IN ('{sex_list}')
+          AND p.primary_language IN ('{lang_list}')
+          AND p.race IN ('{race_list}')
+          AND d.department_name IN ('{dept_list}')
+    """
+
+    cohort_df = run_query(cohort_query)
+    cohort_size = len(cohort_df)
+
+    st.divider()
+    st.subheader(f"Cohort Results — {cohort_size:,} patients matched")
+
+    if cohort_size == 0:
+        st.warning("No patients match the selected filters. Try broadening your criteria.")
+    else:
+        cohort_keys = tuple(cohort_df['patient_key'].tolist())
+        # Handle single-item tuple formatting for SQL IN clause.
+        keys_sql = f"({cohort_keys[0]})" if len(cohort_keys) == 1 else str(cohort_keys)
+
+        col1, col2, col3, col4 = st.columns(4)
+
+        # No-show rate for this cohort
+        noshow_df = run_query(f"""
+            SELECT
+                COUNT(*) AS total_appts,
+                SUM(CASE WHEN is_no_show THEN 1 ELSE 0 END) AS no_shows,
+                ROUND(100.0 * SUM(CASE WHEN is_no_show THEN 1 ELSE 0 END) / COUNT(*), 1)
+                    AS no_show_rate
+            FROM analytics_marts.fact_appointments
+            WHERE patient_key IN {keys_sql}
+        """)
+
+        # Readmission rate for this cohort
+        readmit_df = run_query(f"""
+            SELECT
+                COUNT(*) AS total_inpatient,
+                SUM(CASE WHEN is_30_day_readmission THEN 1 ELSE 0 END) AS readmissions,
+                ROUND(100.0 * SUM(CASE WHEN is_30_day_readmission THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0), 1)
+                    AS readmit_rate
+            FROM analytics_marts.fct_readmissions
+            WHERE patient_key IN {keys_sql}
+        """)
+
+        # Patient days for this cohort
+        days_df = run_query(f"""
+            SELECT ROUND(SUM(length_of_stay_days)::numeric, 1) AS patient_days
+            FROM analytics_marts.fact_encounters
+            WHERE encounter_type = 'Inpatient' AND patient_key IN {keys_sql}
+        """)
+
+        with col1:
+            st.metric("Cohort Size", f"{cohort_size:,} patients")
+        with col2:
+            rate = noshow_df['no_show_rate'][0] if not noshow_df.empty else 0
+            st.metric("No-Show Rate", f"{rate}%")
+        with col3:
+            rate = readmit_df['readmit_rate'][0] if not readmit_df.empty else 0
+            st.metric("Readmission Rate", f"{rate}%")
+        with col4:
+            days = days_df['patient_days'][0] if not days_df.empty else 0
+            st.metric("Patient Days", f"{days:,}")
+
+        st.divider()
+
+        # Department breakdown for this cohort
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.subheader("No-Show Rate by Department")
+            dept_df = run_query(f"""
+                SELECT d.department_name,
+                       COUNT(*) AS total,
+                       ROUND(100.0 * SUM(CASE WHEN fa.is_no_show THEN 1 ELSE 0 END) / COUNT(*), 1)
+                           AS no_show_rate
+                FROM analytics_marts.fact_appointments fa
+                JOIN analytics_staging.stg_departments d ON d.department_key = fa.department_key
+                WHERE fa.patient_key IN {keys_sql}
+                GROUP BY d.department_name
+                ORDER BY no_show_rate DESC
+            """)
+            fig = px.bar(dept_df, x='no_show_rate', y='department_name',
+                         orientation='h', color='no_show_rate',
+                         color_continuous_scale='Reds',
+                         labels={'no_show_rate': 'No-Show Rate (%)', 'department_name': ''})
+            st.plotly_chart(fig, use_container_width=True)
+
+        with col2:
+            st.subheader("Age Distribution")
+            age_df = run_query(f"""
+                SELECT age_years, COUNT(*) AS count
+                FROM analytics_marts.dim_patients
+                WHERE patient_key IN {keys_sql}
+                GROUP BY age_years ORDER BY age_years
+            """)
+            fig = px.bar(age_df, x='age_years', y='count',
+                         labels={'age_years': 'Age (years)', 'count': 'Patients'},
+                         title="Age Distribution of Cohort")
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Patient list for this cohort
+        st.subheader("Cohort Patient List")
+        patient_list_df = run_query(f"""
+            SELECT p.patient_key, p.first_name, p.last_name, p.age_years,
+                   p.sex, p.race, p.primary_language,
+                   COUNT(DISTINCT fa.appointment_key) AS total_appts,
+                   SUM(CASE WHEN fa.is_no_show THEN 1 ELSE 0 END) AS no_shows
+            FROM analytics_marts.dim_patients p
+            LEFT JOIN analytics_marts.fact_appointments fa ON fa.patient_key = p.patient_key
+            WHERE p.patient_key IN {keys_sql}
+            GROUP BY p.patient_key, p.first_name, p.last_name, p.age_years,
+                     p.sex, p.race, p.primary_language
+            ORDER BY no_shows DESC
+            LIMIT 50
+        """)
+        st.dataframe(patient_list_df, use_container_width=True)
+
+
+# ----------------------------------------------------------------------------
+# SECTION 8: DATA QUALITY MONITORING
 # ----------------------------------------------------------------------------
 
 elif section == "🧪 Data Quality":
