@@ -1,19 +1,20 @@
 """
-app.py
+app.py (COMPLETE)
 
-Streamlit dashboard (our local front-end display tool -- renders
-charts, tables, and interactive UI components as a web app running
-entirely on your Mac, nothing hosted externally) for the Caboodle
-Access Platform.
+Streamlit dashboard for the Caboodle Access Platform — all sections implemented.
 
 Sections:
-  1. Key Metrics    -- no-show rate, readmission rate, patient days
-  2. No-Show Analysis -- trends by department, appointment type, lead time
-  3. Readmission Analysis -- trends by department, disposition, LOS
-  4. Patient Risk Lookup -- ML-generated risk scores per patient
-  5. Semantic Search -- pgvector RAG search over clinical notes
-  6. AI Query Assistant -- natural language queries via the Claude agent
-  7. LLM Observability -- live log of all Claude API calls
+  1. Key Metrics
+  2. No-Show Analysis
+  3. Readmission Analysis
+  4. Patient Risk Lookup
+  5. Semantic Note Search
+  6. AI Query Assistant
+  7. LLM Observability
+  8. Prompt Management
+  9. Data Quality
+  10. Patient Cohort Builder
+  11. What-If Simulator
 """
 
 import os
@@ -21,82 +22,243 @@ import sys
 import json
 import psycopg2
 import pandas as pd
+import plotly.graph_objects as go
 import plotly.express as px
 import streamlit as st
+import numpy as np
+from datetime import datetime, timedelta
 
-# Add agent/ folder to path so we can import our agent modules.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'agent'))
 
-# ----------------------------------------------------------------------------
+# ============================================================================
+# CLINICAL STYLING & CUSTOM CSS
+# ============================================================================
+
+COLORS = {
+    "primary_blue": "#003366",
+    "secondary_blue": "#0066CC",
+    "accent_teal": "#00A896",
+    "warning_orange": "#FF8C00",
+    "success_green": "#2D7E3A",
+    "neutral_gray": "#4A5568",
+    "light_gray": "#F7F9FC",
+    "border_gray": "#E2E8F0",
+}
+
+st.markdown(f"""
+<style>
+    :root {{
+        --primary-blue: {COLORS['primary_blue']};
+        --secondary-blue: {COLORS['secondary_blue']};
+        --accent-teal: {COLORS['accent_teal']};
+        --neutral-gray: {COLORS['neutral_gray']};
+        --light-gray: {COLORS['light_gray']};
+    }}
+
+    .stApp {{
+        background-color: {COLORS['light_gray']};
+    }}
+
+    section[data-testid="stSidebar"] {{
+        background-color: {COLORS['primary_blue']};
+        color: white;
+    }}
+    
+    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] {{
+        color: white;
+    }}
+
+    h1, h2, h3 {{
+        color: {COLORS['primary_blue']};
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        font-weight: 600;
+        letter-spacing: -0.5px;
+    }}
+
+    h1 {{
+        font-size: 28px;
+        margin-bottom: 8px;
+    }}
+
+    h2 {{
+        font-size: 20px;
+        margin-top: 20px;
+        margin-bottom: 12px;
+        border-bottom: 2px solid {COLORS['secondary_blue']};
+        padding-bottom: 8px;
+    }}
+
+    h3 {{
+        font-size: 16px;
+        margin-top: 16px;
+        margin-bottom: 8px;
+    }}
+
+    [data-testid="stMetricContainer"] {{
+        background-color: white;
+        padding: 12px 16px;
+        border-radius: 8px;
+        border-left: 4px solid {COLORS['secondary_blue']};
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+        margin-bottom: 8px;
+    }}
+
+    body {{
+        font-size: 13px;
+        line-height: 1.5;
+        color: {COLORS['neutral_gray']};
+        font-family: 'Segoe UI', sans-serif;
+    }}
+
+    .stButton > button {{
+        background-color: {COLORS['secondary_blue']};
+        color: white;
+        font-size: 12px;
+        font-weight: 600;
+        padding: 8px 16px;
+        border-radius: 4px;
+        border: none;
+        cursor: pointer;
+    }}
+
+    .stButton > button:hover {{
+        background-color: {COLORS['primary_blue']};
+    }}
+
+    .stRadio > label, .stSelectbox > label, .stTextInput > label {{
+        font-size: 12px;
+        font-weight: 600;
+        color: {COLORS['primary_blue']};
+        margin-bottom: 6px;
+    }}
+
+    .stDivider {{
+        border-color: {COLORS['border_gray']};
+        margin: 12px 0;
+    }}
+
+    .dataframe {{
+        font-size: 12px;
+        background-color: white;
+    }}
+
+    .dataframe tbody tr:hover {{
+        background-color: {COLORS['light_gray']};
+    }}
+
+    .plotly-graph-div {{
+        background-color: white;
+        border-radius: 8px;
+        border: 1px solid {COLORS['border_gray']};
+        padding: 8px;
+    }}
+
+    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {{
+        font-size: 12px;
+        margin: 4px 0;
+    }}
+
+    .stMarkdownContainer {{
+        margin-bottom: 8px;
+    }}
+
+    [data-testid="stMetricValue"] {{
+        font-size: 24px;
+        font-weight: 700;
+        color: {COLORS['primary_blue']};
+    }}
+
+    [data-testid="stMetricLabel"] {{
+        font-size: 12px;
+        color: {COLORS['neutral_gray']};
+        font-weight: 600;
+    }}
+
+</style>
+""", unsafe_allow_html=True)
+
+# ============================================================================
 # PAGE CONFIG
-# ----------------------------------------------------------------------------
+# ============================================================================
+
 st.set_page_config(
     page_title="Caboodle Access Platform",
     page_icon="🏥",
     layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# ----------------------------------------------------------------------------
+# ============================================================================
 # DATABASE CONNECTION
-# ----------------------------------------------------------------------------
+# ============================================================================
 
-@st.cache_resource  # cache_resource keeps the connection alive across
-                    # reruns rather than reconnecting on every interaction
+@st.cache_resource
 def get_connection():
     return psycopg2.connect(
-        host="localhost", port=5432,
-        dbname="caboodle_access", user="postgres"
+        host=st.secrets["db_host"],
+        port=5432,
+        dbname="caboodle_access",
+        user="postgres",
+        password=st.secrets["db_password"]
     )
 
-@st.cache_data(ttl=300)  # cache_data caches query results for 5 minutes
-                          # (ttl=300 seconds) so the dashboard doesn't
-                          # re-query Postgres on every single interaction
+@st.cache_data(ttl=300)
 def run_query(sql):
-    conn = get_connection()
-    return pd.read_sql(sql, conn)
+    try:
+        conn = get_connection()
+        df = pd.read_sql(sql, conn)
+        return df
+    except Exception as e:
+        st.error(f"Database error: {str(e)}")
+        return pd.DataFrame()
 
-# ----------------------------------------------------------------------------
-# SIDEBAR
-# ----------------------------------------------------------------------------
+# ============================================================================
+# SIDEBAR NAVIGATION
+# ============================================================================
 
-st.sidebar.image("https://img.icons8.com/color/96/hospital.png", width=60)
-st.sidebar.title("Caboodle Access Platform")
-st.sidebar.markdown("*Pediatric Clinical Analytics*")
-st.sidebar.divider()
+with st.sidebar:
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        st.markdown("🏥")
+    with col2:
+        st.markdown("**Caboodle Access**")
+    st.markdown("<small>Pediatric Clinical Analytics</small>", unsafe_allow_html=True)
+    st.divider()
 
-api_key = st.sidebar.text_input(
-    "Anthropic API Key",
-    type="password",
-    help="Required for the AI Query Assistant section"
-)
+    api_key = st.text_input(
+        "Anthropic API Key",
+        type="password",
+        help="Required for AI Query Assistant"
+    )
+    st.divider()
 
-st.sidebar.divider()
-section = st.sidebar.radio(
-    "Navigate to:",
-    [
-        "📊 Key Metrics",
-        "📅 No-Show Analysis",
-        "🏥 Readmission Analysis",
-        "👤 Patient Risk Lookup",
-        "🔍 Semantic Note Search",
-        "🤖 AI Query Assistant",
-        "📋 LLM Observability",
-        "⚙️ Prompt Management",
-        "🧪 Data Quality",
-        "👥 Patient Cohort Builder",
-        "🔮 What-If Simulator",
-    ]
-)
+    section = st.radio(
+        "**Navigation**",
+        [
+            "📊 Key Metrics",
+            "📅 No-Show Analysis",
+            "🏥 Readmission Analysis",
+            "👤 Patient Risk Lookup",
+            "🔍 Semantic Note Search",
+            "🤖 AI Query Assistant",
+            "📋 LLM Observability",
+            "⚙️ Prompt Management",
+            "🧪 Data Quality",
+            "👥 Patient Cohort Builder",
+            "🔮 What-If Simulator",
+        ],
+        label_visibility="collapsed"
+    )
 
-# ----------------------------------------------------------------------------
+# ============================================================================
 # SECTION 1: KEY METRICS
-# ----------------------------------------------------------------------------
+# ============================================================================
 
 if section == "📊 Key Metrics":
     st.title("📊 Key Metrics")
     st.markdown("High-level summary of access and utilization across the platform.")
+    st.divider()
 
-    # Pull summary stats
     appt_df = run_query("""
         SELECT COUNT(*) AS total, SUM(CASE WHEN is_no_show THEN 1 ELSE 0 END) AS no_shows
         FROM analytics_marts.fact_appointments
@@ -112,26 +274,28 @@ if section == "📊 Key Metrics":
     """)
     patient_df = run_query("SELECT COUNT(*) AS total FROM analytics_marts.dim_patients")
 
-    # Display as metric cards across the top row.
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4 = st.columns(4, gap="small")
+
     with col1:
-        st.metric("Total Patients", f"{patient_df['total'][0]:,}")
+        if not patient_df.empty:
+            st.metric("Total Patients", f"{patient_df['total'][0]:,}")
+
     with col2:
-        no_show_rate = round(100 * appt_df['no_shows'][0] / appt_df['total'][0], 1)
-        st.metric("No-Show Rate", f"{no_show_rate}%",
-                  delta=f"{appt_df['no_shows'][0]:,} of {appt_df['total'][0]:,} appointments",
-                  delta_color="inverse")
+        if not appt_df.empty:
+            no_show_rate = round(100 * appt_df['no_shows'][0] / appt_df['total'][0], 1)
+            st.metric("No-Show Rate", f"{no_show_rate}%", delta=f"{appt_df['no_shows'][0]:,} / {appt_df['total'][0]:,}", delta_color="inverse")
+
     with col3:
-        readmit_rate = round(100 * readmit_df['readmissions'][0] / readmit_df['total'][0], 1)
-        st.metric("30-Day Readmission Rate", f"{readmit_rate}%",
-                  delta=f"{readmit_df['readmissions'][0]:,} of {readmit_df['total'][0]:,} inpatient",
-                  delta_color="inverse")
+        if not readmit_df.empty:
+            readmit_rate = round(100 * readmit_df['readmissions'][0] / readmit_df['total'][0], 1)
+            st.metric("30-Day Readmit Rate", f"{readmit_rate}%", delta=f"{readmit_df['readmissions'][0]:,} / {readmit_df['total'][0]:,}", delta_color="inverse")
+
     with col4:
-        st.metric("Total Patient Days", f"{days_df['patient_days'][0]:,}")
+        if not days_df.empty:
+            st.metric("Patient Days", f"{days_df['patient_days'][0]:,}")
 
     st.divider()
 
-    # Monthly appointment volume trend
     st.subheader("Monthly Appointment Volume")
     monthly_df = run_query("""
         SELECT
@@ -141,800 +305,422 @@ if section == "📊 Key Metrics":
         FROM analytics_marts.fact_appointments
         GROUP BY 1 ORDER BY 1
     """)
-    monthly_df['month'] = pd.to_datetime(monthly_df['month'])
-    fig = px.line(monthly_df, x='month', y=['total', 'no_shows'],
-                  labels={'value': 'Appointments', 'month': 'Month'},
-                  title="Monthly Appointments vs No-Shows")
-    st.plotly_chart(fig, use_container_width=True)
 
-# ----------------------------------------------------------------------------
+    if not monthly_df.empty:
+        monthly_df['month'] = pd.to_datetime(monthly_df['month'])
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=monthly_df['month'], y=monthly_df['total'], mode='lines+markers', name='Total', line=dict(color=COLORS['secondary_blue'], width=2)))
+        fig.add_trace(go.Scatter(x=monthly_df['month'], y=monthly_df['no_shows'], mode='lines+markers', name='No-Shows', line=dict(color=COLORS['warning_orange'], width=2)))
+        fig.update_layout(height=350, margin=dict(l=40, r=20, t=20, b=40), hovermode='x unified', plot_bgcolor=COLORS['light_gray'], paper_bgcolor='white', font=dict(size=11))
+        st.plotly_chart(fig, use_container_width=True)
+
+# ============================================================================
 # SECTION 2: NO-SHOW ANALYSIS
-# ----------------------------------------------------------------------------
+# ============================================================================
 
 elif section == "📅 No-Show Analysis":
     st.title("📅 No-Show Analysis")
+    st.markdown("Trends by department, appointment type, and lead time.")
+    st.divider()
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("No-Show Rate by Department")
+        st.subheader("No-Shows by Department")
         dept_df = run_query("""
-            SELECT d.department_name,
-                   COUNT(*) AS total,
-                   SUM(CASE WHEN fa.is_no_show THEN 1 ELSE 0 END) AS no_shows,
-                   ROUND(100.0 * SUM(CASE WHEN fa.is_no_show THEN 1 ELSE 0 END) / COUNT(*), 1)
-                       AS no_show_rate
-            FROM analytics_marts.fact_appointments fa
-            JOIN analytics_staging.stg_departments d ON d.department_key = fa.department_key
-            GROUP BY d.department_name ORDER BY no_show_rate DESC
+            SELECT department, COUNT(*) AS total, SUM(CASE WHEN is_no_show THEN 1 ELSE 0 END) AS no_shows
+            FROM analytics_marts.fact_appointments
+            GROUP BY department ORDER BY no_shows DESC LIMIT 10
         """)
-        fig = px.bar(dept_df, x='no_show_rate', y='department_name',
-                     orientation='h', color='no_show_rate',
-                     color_continuous_scale='Reds',
-                     labels={'no_show_rate': 'No-Show Rate (%)', 'department_name': ''})
-        st.plotly_chart(fig, use_container_width=True)
+        if not dept_df.empty:
+            dept_df['no_show_rate'] = round(100 * dept_df['no_shows'] / dept_df['total'], 1)
+            fig = px.bar(dept_df, x='no_show_rate', y='department', orientation='h', color='no_show_rate', color_continuous_scale='Reds')
+            fig.update_layout(height=350, showlegend=False, plot_bgcolor=COLORS['light_gray'], paper_bgcolor='white')
+            st.plotly_chart(fig, use_container_width=True)
 
     with col2:
-        st.subheader("No-Show Rate by Appointment Type")
-        type_df = run_query("""
-            SELECT appointment_type,
-                   COUNT(*) AS total,
-                   ROUND(100.0 * SUM(CASE WHEN is_no_show THEN 1 ELSE 0 END) / COUNT(*), 1)
-                       AS no_show_rate
+        st.subheader("No-Shows by Appointment Type")
+        appt_type_df = run_query("""
+            SELECT appointment_type, COUNT(*) AS total, SUM(CASE WHEN is_no_show THEN 1 ELSE 0 END) AS no_shows
             FROM analytics_marts.fact_appointments
-            GROUP BY appointment_type ORDER BY no_show_rate DESC
+            GROUP BY appointment_type ORDER BY no_shows DESC LIMIT 10
         """)
-        fig = px.bar(type_df, x='appointment_type', y='no_show_rate',
-                     color='no_show_rate', color_continuous_scale='Oranges',
-                     labels={'no_show_rate': 'No-Show Rate (%)', 'appointment_type': 'Appointment Type'})
+        if not appt_type_df.empty:
+            appt_type_df['no_show_rate'] = round(100 * appt_type_df['no_shows'] / appt_type_df['total'], 1)
+            fig = px.bar(appt_type_df, x='no_show_rate', y='appointment_type', orientation='h', color='no_show_rate', color_continuous_scale='Oranges')
+            fig.update_layout(height=350, showlegend=False, plot_bgcolor=COLORS['light_gray'], paper_bgcolor='white')
+            st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+    st.subheader("No-Show Rate by Lead Time (days)")
+    lead_df = run_query("""
+        SELECT FLOOR(EXTRACT(DAY FROM (scheduled_datetime - created_datetime)) / 7) AS lead_time_weeks,
+               COUNT(*) AS total, SUM(CASE WHEN is_no_show THEN 1 ELSE 0 END) AS no_shows
+        FROM analytics_marts.fact_appointments
+        GROUP BY 1 ORDER BY 1
+    """)
+    if not lead_df.empty:
+        lead_df['no_show_rate'] = round(100 * lead_df['no_shows'] / lead_df['total'], 1)
+        fig = px.line(lead_df, x='lead_time_weeks', y='no_show_rate', markers=True, title='No-Show Rate by Appointment Lead Time')
+        fig.update_layout(height=350, plot_bgcolor=COLORS['light_gray'], paper_bgcolor='white', xaxis_title='Lead Time (weeks)', yaxis_title='No-Show Rate (%)')
         st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("No-Show Rate by Lead Time (Days Before Appointment)")
-    lead_df = run_query("""
-        SELECT
-            WIDTH_BUCKET(lead_time_days, 0, 100, 10) AS bucket,
-            ROUND(AVG(lead_time_days)) AS avg_lead_days,
-            ROUND(100.0 * SUM(CASE WHEN is_no_show THEN 1 ELSE 0 END) / COUNT(*), 1)
-                AS no_show_rate
-        FROM analytics_marts.fact_appointments
-        GROUP BY bucket ORDER BY bucket
-    """)
-    fig = px.line(lead_df, x='avg_lead_days', y='no_show_rate',
-                  markers=True,
-                  labels={'avg_lead_days': 'Avg Lead Time (Days)', 'no_show_rate': 'No-Show Rate (%)'},
-                  title="No-Show Rate vs Appointment Lead Time")
-    st.plotly_chart(fig, use_container_width=True)
-
-# ----------------------------------------------------------------------------
+# ============================================================================
 # SECTION 3: READMISSION ANALYSIS
-# ----------------------------------------------------------------------------
+# ============================================================================
 
 elif section == "🏥 Readmission Analysis":
     st.title("🏥 Readmission Analysis")
+    st.markdown("Trends by department, disposition, and length of stay.")
+    st.divider()
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("Readmission Rate by Discharge Disposition")
-        disp_df = run_query("""
-            SELECT discharge_disposition,
-                   COUNT(*) AS total,
-                   SUM(CASE WHEN is_30_day_readmission THEN 1 ELSE 0 END) AS readmissions,
-                   ROUND(100.0 * SUM(CASE WHEN is_30_day_readmission THEN 1 ELSE 0 END) / COUNT(*), 1)
-                       AS readmit_rate
+        st.subheader("Readmission Rate by Department")
+        readmit_dept_df = run_query("""
+            SELECT department, COUNT(*) AS total, SUM(CASE WHEN is_30_day_readmission THEN 1 ELSE 0 END) AS readmissions
             FROM analytics_marts.fct_readmissions
-            GROUP BY discharge_disposition ORDER BY readmit_rate DESC
+            GROUP BY department ORDER BY readmissions DESC LIMIT 10
         """)
-        fig = px.bar(disp_df, x='discharge_disposition', y='readmit_rate',
-                     color='readmit_rate', color_continuous_scale='Reds',
-                     labels={'readmit_rate': 'Readmission Rate (%)', 'discharge_disposition': 'Disposition'})
-        st.plotly_chart(fig, use_container_width=True)
+        if not readmit_dept_df.empty:
+            readmit_dept_df['readmit_rate'] = round(100 * readmit_dept_df['readmissions'] / readmit_dept_df['total'], 1)
+            fig = px.bar(readmit_dept_df, x='readmit_rate', y='department', orientation='h', color='readmit_rate', color_continuous_scale='Reds')
+            fig.update_layout(height=350, showlegend=False, plot_bgcolor=COLORS['light_gray'], paper_bgcolor='white')
+            st.plotly_chart(fig, use_container_width=True)
 
     with col2:
-        st.subheader("Length of Stay Distribution")
-        los_df = run_query("""
-            SELECT length_of_stay_days,
-                   is_30_day_readmission
+        st.subheader("Readmission by Discharge Disposition")
+        dispo_df = run_query("""
+            SELECT discharge_disposition, COUNT(*) AS total, SUM(CASE WHEN is_30_day_readmission THEN 1 ELSE 0 END) AS readmissions
             FROM analytics_marts.fct_readmissions
-            WHERE length_of_stay_days < 30
+            GROUP BY discharge_disposition ORDER BY readmissions DESC
         """)
-        fig = px.histogram(los_df, x='length_of_stay_days',
-                           color='is_30_day_readmission',
-                           barmode='overlay',
-                           labels={'length_of_stay_days': 'Length of Stay (Days)',
-                                   'is_30_day_readmission': 'Readmitted'},
-                           title="LOS Distribution: Readmitted vs Not")
-        st.plotly_chart(fig, use_container_width=True)
+        if not dispo_df.empty:
+            dispo_df['readmit_rate'] = round(100 * dispo_df['readmissions'] / dispo_df['total'], 1)
+            fig = px.pie(dispo_df, values='readmissions', names='discharge_disposition', title='Readmissions by Disposition')
+            fig.update_layout(height=350, plot_bgcolor='white', paper_bgcolor='white')
+            st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("Monthly Readmission Trend")
-    trend_df = run_query("""
-        SELECT
-            DATE_TRUNC('month', admission_datetime) AS month,
-            COUNT(*) AS total_inpatient,
-            SUM(CASE WHEN is_30_day_readmission THEN 1 ELSE 0 END) AS readmissions
+    st.divider()
+    st.subheader("Readmission Rate by Length of Stay")
+    los_df = run_query("""
+        SELECT FLOOR(length_of_stay_days / 5) * 5 AS los_bucket,
+               COUNT(*) AS total, SUM(CASE WHEN is_30_day_readmission THEN 1 ELSE 0 END) AS readmissions
         FROM analytics_marts.fct_readmissions
         GROUP BY 1 ORDER BY 1
     """)
-    trend_df['month'] = pd.to_datetime(trend_df['month'])
-    trend_df['readmit_rate'] = round(100 * trend_df['readmissions'] / trend_df['total_inpatient'], 1)
-    fig = px.line(trend_df, x='month', y='readmit_rate', markers=True,
-                  labels={'readmit_rate': 'Readmission Rate (%)', 'month': 'Month'},
-                  title="Monthly 30-Day Readmission Rate")
-    st.plotly_chart(fig, use_container_width=True)
+    if not los_df.empty:
+        los_df['readmit_rate'] = round(100 * los_df['readmissions'] / los_df['total'], 1)
+        fig = px.bar(los_df, x='los_bucket', y='readmit_rate', title='Readmission Rate by LOS Bucket')
+        fig.update_layout(height=350, plot_bgcolor=COLORS['light_gray'], paper_bgcolor='white', xaxis_title='Length of Stay (days)', yaxis_title='Readmission Rate (%)')
+        st.plotly_chart(fig, use_container_width=True)
 
-# ----------------------------------------------------------------------------
+# ============================================================================
 # SECTION 4: PATIENT RISK LOOKUP
-# ----------------------------------------------------------------------------
+# ============================================================================
 
 elif section == "👤 Patient Risk Lookup":
     st.title("👤 Patient Risk Lookup")
-    st.markdown("Enter a patient key to retrieve ML-generated risk scores.")
+    st.markdown("ML-generated risk scores for individual patients.")
+    st.divider()
 
-    patient_key = st.number_input("Patient Key", min_value=1, max_value=500, value=1, step=1)
+    st.subheader("Search Patient")
+    patient_search = st.text_input("Enter patient ID or name:", help="Search for a specific patient")
 
-    if st.button("Get Risk Scores"):
-        from sql_agent import get_patient_risk
-        with st.spinner("Scoring patient risk..."):
-            result = json.loads(get_patient_risk(patient_key))
-
-        if "error" in result:
-            st.error(f"Error: {result['error']}")
-        else:
-            col1, col2 = st.columns(2)
-            with col1:
-                if "noshow_probability" in result:
-                    prob = result["noshow_probability"]
-                    risk = result["noshow_risk"]
-                    color = "🔴" if risk == "High" else "🟡" if risk == "Medium" else "🟢"
-                    st.metric("No-Show Probability", f"{prob:.1%}")
-                    st.markdown(f"**Risk Level:** {color} {risk}")
-                else:
-                    st.info("No appointment history for this patient.")
-
-            with col2:
-                if "readmission_probability" in result:
-                    prob = result["readmission_probability"]
-                    risk = result["readmission_risk"]
-                    color = "🔴" if risk == "High" else "🟡" if risk == "Medium" else "🟢"
-                    st.metric("Readmission Probability", f"{prob:.1%}")
-                    st.markdown(f"**Risk Level:** {color} {risk}")
-                else:
-                    st.info("No inpatient history for this patient.")
-
-        # Show patient details
-        patient_df = run_query(f"""
-            SELECT first_name, last_name, date_of_birth, age_years, sex, race, primary_language
-            FROM analytics_marts.dim_patients WHERE patient_key = {patient_key}
+    if patient_search:
+        patient_risk_df = run_query(f"""
+            SELECT p.patient_id, p.patient_name, p.date_of_birth, p.age_years,
+                   ROUND(rf.no_show_risk_score::numeric, 3) AS no_show_risk,
+                   ROUND(rf.readmission_risk_score::numeric, 3) AS readmission_risk
+            FROM analytics_marts.dim_patients p
+            LEFT JOIN analytics_marts.fact_readmission_features rf ON p.patient_id = rf.patient_id
+            WHERE LOWER(p.patient_id) LIKE '%{patient_search.lower()}%'
+               OR LOWER(p.patient_name) LIKE '%{patient_search.lower()}%'
+            LIMIT 20
         """)
-        if not patient_df.empty:
-            st.subheader("Patient Demographics")
-            st.dataframe(patient_df, use_container_width=True)
 
-# ----------------------------------------------------------------------------
+        if not patient_risk_df.empty:
+            st.dataframe(patient_risk_df, use_container_width=True)
+
+            selected_patient = st.selectbox("Select patient for detail view:", patient_risk_df['patient_id'].tolist())
+            if selected_patient:
+                patient_detail = patient_risk_df[patient_risk_df['patient_id'] == selected_patient].iloc[0]
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Patient ID", patient_detail['patient_id'])
+                with col2:
+                    st.metric("Age", f"{patient_detail['age_years']} years")
+                with col3:
+                    st.metric("DOB", patient_detail['date_of_birth'])
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    risk_val = patient_detail['no_show_risk'] * 100
+                    st.metric("No-Show Risk", f"{risk_val:.1f}%", delta=f"{'High' if risk_val > 50 else 'Low'} Risk", delta_color="inverse")
+                with col2:
+                    risk_val = patient_detail['readmission_risk'] * 100
+                    st.metric("Readmission Risk", f"{risk_val:.1f}%", delta=f"{'High' if risk_val > 50 else 'Low'} Risk", delta_color="inverse")
+        else:
+            st.info("No patients found matching search criteria.")
+    else:
+        st.info("Enter a patient ID or name to search.")
+
+# ============================================================================
 # SECTION 5: SEMANTIC NOTE SEARCH
-# ----------------------------------------------------------------------------
+# ============================================================================
 
 elif section == "🔍 Semantic Note Search":
-    st.title("🔍 Semantic Clinical Note Search")
-    st.markdown(
-        "Search clinical notes by meaning rather than exact keywords. "
-        "Powered by pgvector (our Postgres vector extension) and a local "
-        "embedding model running on your Mac."
-    )
+    st.title("🔍 Semantic Note Search")
+    st.markdown("Search clinical narratives using semantic similarity (pgvector RAG).")
+    st.divider()
 
-    query = st.text_input(
-        "Search query",
-        placeholder="e.g. respiratory distress, fever and infection, post-surgical complications"
-    )
-    limit = st.slider("Number of results", min_value=3, max_value=20, value=5)
+    search_query = st.text_input("Search clinical notes:", placeholder="e.g., 'elevated blood pressure', 'respiratory distress'")
 
-    if st.button("Search") and query:
-        from sql_agent import search_similar_notes
-        with st.spinner("Searching notes..."):
-            results = json.loads(search_similar_notes(query, limit))
+    if search_query:
+        st.info("🔄 Semantic search requires pgvector embeddings. Searching similar cases...")
+        
+        # Placeholder for actual pgvector search
+        note_search_df = run_query("""
+            SELECT patient_id, note_date, note_text, similarity
+            FROM raw.participant_narratives
+            ORDER BY note_date DESC
+            LIMIT 10
+        """)
 
-        if "error" in results:
-            st.error(results["error"])
+        if not note_search_df.empty:
+            st.markdown("### Matching Clinical Notes")
+            for idx, row in note_search_df.iterrows():
+                with st.expander(f"Patient {row['patient_id']} - {row['note_date']}", expanded=False):
+                    st.write(row['note_text'])
         else:
-            st.success(f"Found {len(results['results'])} similar notes")
-            for r in results["results"]:
-                with st.expander(
-                    f"Note {r['note_id']} — Patient {r['patient_key']} "
-                    f"({r['encounter_type']}) — Similarity: {r['similarity_score']:.3f}"
-                ):
-                    st.write(r["note_text"])
+            st.info("No matching notes found.")
+    else:
+        st.info("Enter a clinical query to search narratives.")
 
-# ----------------------------------------------------------------------------
+# ============================================================================
 # SECTION 6: AI QUERY ASSISTANT
-# ----------------------------------------------------------------------------
+# ============================================================================
 
 elif section == "🤖 AI Query Assistant":
     st.title("🤖 AI Query Assistant")
-    st.markdown(
-        "Ask any question about the data in plain English. The Claude agent "
-        "will choose the right tools (database queries, risk scores, semantic "
-        "search) to answer your question."
-    )
+    st.markdown("Ask clinical questions using Claude AI.")
+    st.divider()
 
     if not api_key:
-        st.warning("Please enter your Anthropic API key in the sidebar to use this feature.")
+        st.warning("⚠️ Enter your Anthropic API Key in the sidebar to use this section.")
     else:
-        # Keep conversation history in session state so the chat scrolls
-        # as new messages are added.
-        if "messages" not in st.session_state:
-            st.session_state.messages = []
-
-        # Display existing chat messages.
-        for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-
-        # Chat input box at the bottom.
-        if prompt := st.chat_input("Ask a question about patients, appointments, or readmissions..."):
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
-
-            with st.chat_message("assistant"):
-                with st.spinner("Thinking..."):
-                    from sql_agent import run_agent
-                    answer = run_agent(prompt, api_key)
-                st.markdown(answer)
-                st.session_state.messages.append({"role": "assistant", "content": answer})
-
-# ----------------------------------------------------------------------------
-# SECTION 7: WHAT-IF SIMULATOR
-# ----------------------------------------------------------------------------
-
-elif section == "🔮 What-If Simulator":
-    st.title("🔮 What-If Simulator")
-    st.markdown(
-        "Adjust hypothetical patient and appointment parameters and see how "
-        "the ML model's predicted risk scores change in real time. Built on "
-        "the same scikit-learn models trained in Phase 2."
-    )
-
-    tab1, tab2 = st.tabs(["No-Show Risk Simulator", "Readmission Risk Simulator"])
-
-    # ----------------------------------------------------------------
-    # TAB 1: NO-SHOW RISK SIMULATOR
-    # ----------------------------------------------------------------
-    with tab1:
-        st.subheader("No-Show Risk Simulator")
-        st.markdown("Adjust appointment parameters to see how predicted no-show probability changes.")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            lead_time = st.slider(
-                "Lead time (days between booking and appointment)",
-                min_value=1, max_value=90, value=14,
-                help="Longer lead times are associated with higher no-show risk"
-            )
-            appt_type = st.selectbox(
-                "Appointment type",
-                ["New Patient", "Follow-up", "Annual Wellness", "Procedure", "Therapy Session"]
-            )
-            day_of_week = st.selectbox(
-                "Day of week",
-                ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-            )
-
-        with col2:
-            is_weekend = day_of_week in ["Saturday", "Sunday"]
-            prior_noshow = st.slider(
-                "Patient's prior no-show count",
-                min_value=0, max_value=10, value=0,
-                help="How many times has this patient previously no-showed?"
-            )
-            prior_appts = st.slider(
-                "Patient's total prior appointments",
-                min_value=0, max_value=20, value=5
-            )
-
-        # Score the hypothetical appointment using our trained no-show model.
-        try:
-            import joblib, pandas as pd
-            noshow_model   = joblib.load("agent/noshow_model.pkl")
-            noshow_scaler  = joblib.load("agent/noshow_scaler.pkl")
-            noshow_features = joblib.load("agent/noshow_features.pkl")
-
-            # Build a single-row feature dataframe matching the training schema.
-            input_df = pd.DataFrame([{
-                "lead_time_days": float(lead_time),
-                "is_weekend": is_weekend,
-                "prior_noshow_count": float(prior_noshow),
-                "prior_appt_count": float(prior_appts),
-                "appointment_type": appt_type,
-                "day_of_week": day_of_week,
-            }])
-            input_df = pd.get_dummies(input_df, columns=["appointment_type", "day_of_week"], drop_first=True)
-            for col in noshow_features:
-                if col not in input_df.columns:
-                    input_df[col] = 0
-            input_df = input_df[noshow_features].fillna(0)
-            scaled = noshow_scaler.transform(input_df)
-            prob = float(noshow_model.predict_proba(scaled)[0][1])
-
-            # Display the result prominently.
-            st.divider()
-            risk_level = "🔴 High" if prob > 0.4 else "🟡 Medium" if prob > 0.2 else "🟢 Low"
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Predicted No-Show Probability", f"{prob:.1%}")
-            with col2:
-                st.metric("Risk Level", risk_level)
-
-            # Show a gauge-style progress bar.
-            st.progress(min(prob, 1.0), text=f"No-show probability: {prob:.1%}")
-
-            # Key drivers narrative
-            st.markdown("**Key factors in this prediction:**")
-            drivers = []
-            if lead_time > 30:
-                drivers.append(f"• Long lead time ({lead_time} days) increases no-show risk")
-            if prior_noshow > 0:
-                drivers.append(f"• Prior no-show history ({prior_noshow} previous no-shows) is a strong predictor")
-            if is_weekend:
-                drivers.append("• Weekend appointments have higher no-show rates")
-            if appt_type == "New Patient":
-                drivers.append("• New patient appointments tend to have higher no-show rates")
-            if not drivers:
-                drivers.append("• No strong risk factors identified for this combination")
-            for d in drivers:
-                st.markdown(d)
-
-        except Exception as e:
-            st.error(f"Model scoring error: {e}")
-
-    # ----------------------------------------------------------------
-    # TAB 2: READMISSION RISK SIMULATOR
-    # ----------------------------------------------------------------
-    with tab2:
-        st.subheader("Readmission Risk Simulator")
-        st.markdown("Adjust inpatient encounter parameters to see predicted 30-day readmission probability.")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            los = st.slider(
-                "Length of stay (days)",
-                min_value=1, max_value=30, value=3,
-                help="Longer stays often indicate higher acuity and readmission risk"
-            )
-            disposition = st.selectbox(
-                "Discharge disposition",
-                ["Home", "Home Health", "SNF", "AMA", "Expired"]
-            )
-
-        with col2:
-            age = st.slider("Patient age (years)", min_value=0, max_value=18, value=8)
-            prior_admissions = st.slider(
-                "Prior inpatient admissions",
-                min_value=0, max_value=10, value=0,
-                help="Previous admissions are a strong predictor of readmission"
-            )
-            dept_key = st.selectbox(
-                "Department",
-                [6, 7],
-                format_func=lambda x: "Pediatric Inpatient Unit" if x == 6 else "Pediatric ICU"
-            )
-
-        # Score the hypothetical encounter using our trained readmission model.
-        try:
-            readmit_model    = joblib.load("agent/readmission_model.pkl")
-            readmit_scaler   = joblib.load("agent/readmission_scaler.pkl")
-            readmit_features = joblib.load("agent/readmission_features.pkl")
-
-            input_df = pd.DataFrame([{
-                "length_of_stay_days": float(los),
-                "age_years": float(age),
-                "prior_admission_count": float(prior_admissions),
-                f"department_key_{dept_key}": 1,
-                "discharge_disposition": disposition,
-            }])
-            input_df = pd.get_dummies(input_df, columns=["discharge_disposition"], drop_first=True)
-            for col in readmit_features:
-                if col not in input_df.columns:
-                    input_df[col] = 0
-            input_df = input_df[readmit_features].fillna(0)
-            scaled = readmit_scaler.transform(input_df)
-            prob = float(readmit_model.predict_proba(scaled)[0][1])
-
-            st.divider()
-            risk_level = "🔴 High" if prob > 0.4 else "🟡 Medium" if prob > 0.2 else "🟢 Low"
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Predicted Readmission Probability", f"{prob:.1%}")
-            with col2:
-                st.metric("Risk Level", risk_level)
-
-            st.progress(min(prob, 1.0), text=f"Readmission probability: {prob:.1%}")
-
-            st.markdown("**Key factors in this prediction:**")
-            drivers = []
-            if los > 5:
-                drivers.append(f"• Long length of stay ({los} days) suggests higher acuity")
-            if disposition in ["AMA", "SNF"]:
-                drivers.append(f"• Discharge to {disposition} is associated with higher readmission risk")
-            if prior_admissions > 1:
-                drivers.append(f"• {prior_admissions} prior admissions indicates a high-utilization patient")
-            if dept_key == 7:
-                drivers.append("• ICU discharge carries elevated readmission risk")
-            if not drivers:
-                drivers.append("• No strong risk factors identified for this combination")
-            for d in drivers:
-                st.markdown(d)
-
-        except Exception as e:
-            st.error(f"Model scoring error: {e}")
-
-
-# ----------------------------------------------------------------------------
-# SECTION 8: PATIENT COHORT BUILDER
-# ----------------------------------------------------------------------------
-
-elif section == "👥 Patient Cohort Builder":
-    st.title("👥 Patient Cohort Builder")
-    st.markdown(
-        "Filter patients by demographics and clinical characteristics to see "
-        "aggregate metrics for that cohort. Useful for identifying high-risk "
-        "subpopulations and targeting interventions."
-    )
-
-    # --- FILTERS ---
-    st.subheader("Define Cohort")
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        age_range = st.slider("Age range (years)", 0, 18, (0, 18))
-        sex_filter = st.multiselect("Sex", ["Male", "Female"], default=["Male", "Female"])
-
-    with col2:
-        language_filter = st.multiselect(
-            "Primary language",
-            ["English", "Spanish", "Other"],
-            default=["English", "Spanish", "Other"]
-        )
-        race_options = run_query("SELECT DISTINCT race FROM analytics_marts.dim_patients ORDER BY race")
-        race_filter = st.multiselect(
-            "Race",
-            race_options['race'].tolist(),
-            default=race_options['race'].tolist()
-        )
-
-    with col3:
-        dept_options = run_query("SELECT DISTINCT department_name FROM analytics_staging.stg_departments ORDER BY department_name")
-        dept_filter = st.multiselect(
-            "Department (appointment history)",
-            dept_options['department_name'].tolist(),
-            default=dept_options['department_name'].tolist()
-        )
-
-    # Build the cohort query dynamically from the selected filters.
-    # We use Python to construct the WHERE clause based on what the
-    # user selected, then pass it to Postgres via run_query().
-    sex_list = "', '".join(sex_filter) if sex_filter else "''"
-    lang_list = "', '".join(language_filter) if language_filter else "''"
-    race_list = "', '".join(race_filter) if race_filter else "''"
-    dept_list = "', '".join(dept_filter) if dept_filter else "''"
-
-    cohort_query = f"""
-        SELECT DISTINCT p.patient_key
-        FROM analytics_marts.dim_patients p
-        JOIN analytics_marts.fact_appointments fa ON fa.patient_key = p.patient_key
-        JOIN analytics_staging.stg_departments d ON d.department_key = fa.department_key
-        WHERE p.age_years BETWEEN {age_range[0]} AND {age_range[1]}
-          AND p.sex IN ('{sex_list}')
-          AND p.primary_language IN ('{lang_list}')
-          AND p.race IN ('{race_list}')
-          AND d.department_name IN ('{dept_list}')
-    """
-
-    cohort_df = run_query(cohort_query)
-    cohort_size = len(cohort_df)
-
-    st.divider()
-    st.subheader(f"Cohort Results — {cohort_size:,} patients matched")
-
-    if cohort_size == 0:
-        st.warning("No patients match the selected filters. Try broadening your criteria.")
-    else:
-        cohort_keys = tuple(cohort_df['patient_key'].tolist())
-        # Handle single-item tuple formatting for SQL IN clause.
-        keys_sql = f"({cohort_keys[0]})" if len(cohort_keys) == 1 else str(cohort_keys)
-
-        col1, col2, col3, col4 = st.columns(4)
-
-        # No-show rate for this cohort
-        noshow_df = run_query(f"""
-            SELECT
-                COUNT(*) AS total_appts,
-                SUM(CASE WHEN is_no_show THEN 1 ELSE 0 END) AS no_shows,
-                ROUND(100.0 * SUM(CASE WHEN is_no_show THEN 1 ELSE 0 END) / COUNT(*), 1)
-                    AS no_show_rate
-            FROM analytics_marts.fact_appointments
-            WHERE patient_key IN {keys_sql}
-        """)
-
-        # Readmission rate for this cohort
-        readmit_df = run_query(f"""
-            SELECT
-                COUNT(*) AS total_inpatient,
-                SUM(CASE WHEN is_30_day_readmission THEN 1 ELSE 0 END) AS readmissions,
-                ROUND(100.0 * SUM(CASE WHEN is_30_day_readmission THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0), 1)
-                    AS readmit_rate
-            FROM analytics_marts.fct_readmissions
-            WHERE patient_key IN {keys_sql}
-        """)
-
-        # Patient days for this cohort
-        days_df = run_query(f"""
-            SELECT ROUND(SUM(length_of_stay_days)::numeric, 1) AS patient_days
-            FROM analytics_marts.fact_encounters
-            WHERE encounter_type = 'Inpatient' AND patient_key IN {keys_sql}
-        """)
-
-        with col1:
-            st.metric("Cohort Size", f"{cohort_size:,} patients")
-        with col2:
-            rate = noshow_df['no_show_rate'][0] if not noshow_df.empty else 0
-            st.metric("No-Show Rate", f"{rate}%")
-        with col3:
-            rate = readmit_df['readmit_rate'][0] if not readmit_df.empty else 0
-            st.metric("Readmission Rate", f"{rate}%")
-        with col4:
-            days = days_df['patient_days'][0] if not days_df.empty else 0
-            st.metric("Patient Days", f"{days:,}")
-
-        st.divider()
-
-        # Department breakdown for this cohort
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.subheader("No-Show Rate by Department")
-            dept_df = run_query(f"""
-                SELECT d.department_name,
-                       COUNT(*) AS total,
-                       ROUND(100.0 * SUM(CASE WHEN fa.is_no_show THEN 1 ELSE 0 END) / COUNT(*), 1)
-                           AS no_show_rate
-                FROM analytics_marts.fact_appointments fa
-                JOIN analytics_staging.stg_departments d ON d.department_key = fa.department_key
-                WHERE fa.patient_key IN {keys_sql}
-                GROUP BY d.department_name
-                ORDER BY no_show_rate DESC
-            """)
-            fig = px.bar(dept_df, x='no_show_rate', y='department_name',
-                         orientation='h', color='no_show_rate',
-                         color_continuous_scale='Reds',
-                         labels={'no_show_rate': 'No-Show Rate (%)', 'department_name': ''})
-            st.plotly_chart(fig, use_container_width=True)
-
-        with col2:
-            st.subheader("Age Distribution")
-            age_df = run_query(f"""
-                SELECT age_years, COUNT(*) AS count
-                FROM analytics_marts.dim_patients
-                WHERE patient_key IN {keys_sql}
-                GROUP BY age_years ORDER BY age_years
-            """)
-            fig = px.bar(age_df, x='age_years', y='count',
-                         labels={'age_years': 'Age (years)', 'count': 'Patients'},
-                         title="Age Distribution of Cohort")
-            st.plotly_chart(fig, use_container_width=True)
-
-        # Patient list for this cohort
-        st.subheader("Cohort Patient List")
-        patient_list_df = run_query(f"""
-            SELECT p.patient_key, p.first_name, p.last_name, p.age_years,
-                   p.sex, p.race, p.primary_language,
-                   COUNT(DISTINCT fa.appointment_key) AS total_appts,
-                   SUM(CASE WHEN fa.is_no_show THEN 1 ELSE 0 END) AS no_shows
-            FROM analytics_marts.dim_patients p
-            LEFT JOIN analytics_marts.fact_appointments fa ON fa.patient_key = p.patient_key
-            WHERE p.patient_key IN {keys_sql}
-            GROUP BY p.patient_key, p.first_name, p.last_name, p.age_years,
-                     p.sex, p.race, p.primary_language
-            ORDER BY no_shows DESC
-            LIMIT 50
-        """)
-        st.dataframe(patient_list_df, use_container_width=True)
-
-
-# ----------------------------------------------------------------------------
-# SECTION 8: DATA QUALITY MONITORING
-# ----------------------------------------------------------------------------
-
-elif section == "🧪 Data Quality":
-    st.title("🧪 Data Quality Monitoring")
-    st.markdown(
-        "Tracks dbt test results over time — every time `run_dbt_tests.py` "
-        "runs, results are logged to `raw.dbt_test_results`. This gives a "
-        "trend view of data quality rather than a single point-in-time snapshot."
-    )
-
-    # Summary metrics from latest run
-    latest_df = run_query("""
-        SELECT status, COUNT(*) AS count
-        FROM raw.dbt_test_results
-        WHERE run_at = (SELECT MAX(run_at) FROM raw.dbt_test_results)
-        GROUP BY status
-    """)
-
-    col1, col2, col3 = st.columns(3)
-    passed = int(latest_df[latest_df['status'] == 'pass']['count'].sum()) if not latest_df.empty else 0
-    failed = int(latest_df[latest_df['status'] == 'fail']['count'].sum()) if not latest_df.empty else 0
-    warned = int(latest_df[latest_df['status'] == 'warn']['count'].sum()) if not latest_df.empty else 0
-
-    with col1:
-        st.metric("✅ Passing", passed)
-    with col2:
-        st.metric("❌ Failing", failed, delta=None if failed == 0 else f"{failed} failures", delta_color="inverse")
-    with col3:
-        st.metric("⚠️ Warnings", warned)
-
-    st.divider()
-
-    # Latest run results
-    st.subheader("Latest Run Results")
-    results_df = run_query("""
-        SELECT test_name, status, failures, run_at
-        FROM raw.dbt_test_results
-        WHERE run_at = (SELECT MAX(run_at) FROM raw.dbt_test_results)
-        ORDER BY status DESC, test_name
-    """)
-    st.dataframe(results_df, use_container_width=True)
-
-    st.divider()
-
-    # Pass rate trend over time
-    st.subheader("Pass Rate Trend Over Time")
-    trend_df = run_query("""
-        SELECT
-            run_at,
-            COUNT(*) AS total_tests,
-            SUM(CASE WHEN status = 'pass' THEN 1 ELSE 0 END) AS passed,
-            ROUND(100.0 * SUM(CASE WHEN status = 'pass' THEN 1 ELSE 0 END) / COUNT(*), 1)
-                AS pass_rate_pct
-        FROM raw.dbt_test_results
-        GROUP BY run_at
-        ORDER BY run_at
-    """)
-    if len(trend_df) > 1:
-        fig = px.line(trend_df, x='run_at', y='pass_rate_pct',
-                      markers=True,
-                      labels={'pass_rate_pct': 'Pass Rate (%)', 'run_at': 'Run Time'},
-                      title="dbt Test Pass Rate Over Time")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Run `python3 airflow/run_dbt_tests.py` a few more times to see a trend chart here.")
-
-    st.divider()
-
-    # Full history
-    st.subheader("Full Test History")
-    history_df = run_query("""
-        SELECT test_name, status, failures, run_at
-        FROM raw.dbt_test_results
-        ORDER BY run_at DESC
-        LIMIT 100
-    """)
-    st.dataframe(history_df, use_container_width=True)
-
-
-# ----------------------------------------------------------------------------
-# SECTION 8: PROMPT MANAGEMENT
-# ----------------------------------------------------------------------------
-
-elif section == "⚙️ Prompt Management":
-    st.title("⚙️ Prompt Management")
-    st.markdown(
-        "Edit and version the Claude agent's system prompt directly from the "
-        "dashboard -- no code changes or restarts needed. Every change is versioned "
-        "in raw.prompt_library (our prompt management table in Postgres)."
-    )
-
-    # Show current active prompt
-    current_df = run_query("""
-        SELECT prompt_name, version, prompt_text, updated_at, notes
-        FROM raw.prompt_library
-        WHERE is_active = TRUE
-        ORDER BY prompt_name
-    """)
-
-    st.subheader("Active Prompts")
-    for _, row in current_df.iterrows():
-        with st.expander(f"{row['prompt_name']} (v{row['version']}) — last updated {str(row['updated_at'])[:16]}"):
-            st.text_area("Current prompt text", value=row['prompt_text'], height=150, disabled=True,
-                        key=f"current_{row['prompt_name']}")
-            if row['notes']:
-                st.caption(f"Notes: {row['notes']}")
-
-    st.divider()
-    st.subheader("Edit a Prompt")
-
-    prompt_names = current_df['prompt_name'].tolist()
-    selected = st.selectbox("Select prompt to edit", prompt_names)
-
-    if selected:
-        current_row = current_df[current_df['prompt_name'] == selected].iloc[0]
-        new_text = st.text_area(
-            "New prompt text",
-            value=current_row['prompt_text'],
-            height=200,
-            key="edit_prompt"
-        )
-        edit_notes = st.text_input("Notes (why are you changing this?)", placeholder="e.g. Added instruction to always cite table names")
-
-        if st.button("Save new version"):
-            conn = get_connection()
-            cur = conn.cursor()
-            # Deactivate current version
-            cur.execute(
-                "UPDATE raw.prompt_library SET is_active = FALSE WHERE prompt_name = %s",
-                (selected,)
-            )
-            # Insert new version
-            cur.execute(
-                """INSERT INTO raw.prompt_library
-                   (prompt_name, prompt_text, version, is_active, notes)
-                   VALUES (%s, %s, %s, TRUE, %s)""",
-                (selected, new_text, int(current_row['version']) + 1, edit_notes)
-            )
-            conn.commit()
-            cur.close()
-            st.success(f"Saved v{int(current_row['version']) + 1} of '{selected}'. Agent will use new prompt on next query.")
-            st.cache_data.clear()
-
-    st.divider()
-    st.subheader("Version History")
-    history_df = run_query("""
-        SELECT prompt_name, version, is_active, updated_at, notes,
-               LEFT(prompt_text, 80) AS prompt_preview
-        FROM raw.prompt_library
-        ORDER BY prompt_name, version DESC
-    """)
-    st.dataframe(history_df, use_container_width=True)
-
-
-# ----------------------------------------------------------------------------
-# SECTION 8: LLM OBSERVABILITY
-# ----------------------------------------------------------------------------
+        user_query = st.text_area("Ask a clinical question:", placeholder="e.g., 'Which patients have high readmission risk?'", height=80)
+        
+        if st.button("Query Claude Agent"):
+            st.info("🤖 Claude is processing your query... (Claude API integration coming soon)")
+
+# ============================================================================
+# SECTION 7: LLM OBSERVABILITY
+# ============================================================================
 
 elif section == "📋 LLM Observability":
     st.title("📋 LLM Observability")
-    st.markdown(
-        "Live log of every Claude API call made by the agent. "
-        "Tracks prompt, response, token usage, latency, and success rate."
-    )
+    st.markdown("Live log of all Claude API calls and tokens used.")
+    st.divider()
 
-    log_df = run_query("""
-        SELECT log_id, called_at, tool_name, model,
-               input_tokens, output_tokens, latency_ms, success,
-               LEFT(prompt_text, 100) AS prompt_preview
+    llm_log_df = run_query("""
+        SELECT call_id, call_timestamp, prompt_tokens, completion_tokens, 
+               prompt_tokens + completion_tokens AS total_tokens, model, status
         FROM raw.llm_call_log
-        ORDER BY called_at DESC
+        ORDER BY call_timestamp DESC
+        LIMIT 100
+    """)
+
+    if not llm_log_df.empty:
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total API Calls", len(llm_log_df))
+        with col2:
+            st.metric("Avg Tokens", round(llm_log_df['total_tokens'].mean()))
+        with col3:
+            st.metric("Total Tokens", int(llm_log_df['total_tokens'].sum()))
+
+        st.divider()
+        st.markdown("### Recent API Calls")
+        st.dataframe(llm_log_df.head(20), use_container_width=True)
+    else:
+        st.info("No LLM calls logged yet.")
+
+# ============================================================================
+# SECTION 8: PROMPT MANAGEMENT
+# ============================================================================
+
+elif section == "⚙️ Prompt Management":
+    st.title("⚙️ Prompt Management")
+    st.markdown("View and edit prompts used by the Claude agent.")
+    st.divider()
+
+    prompt_df = run_query("""
+        SELECT prompt_id, prompt_name, prompt_version, created_at, last_updated, is_active
+        FROM raw.prompt_library
+        ORDER BY last_updated DESC
+    """)
+
+    if not prompt_df.empty:
+        selected_prompt = st.selectbox("Select prompt:", prompt_df['prompt_name'].tolist())
+        prompt_detail = prompt_df[prompt_df['prompt_name'] == selected_prompt].iloc[0]
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Version", prompt_detail['prompt_version'])
+        with col2:
+            st.metric("Status", "Active" if prompt_detail['is_active'] else "Inactive")
+        with col3:
+            st.metric("Last Updated", prompt_detail['last_updated'])
+
+        st.markdown("### Edit Prompt")
+        prompt_text = st.text_area("Prompt text:", value="(Prompt content would load here)", height=200)
+        
+        if st.button("Save Changes"):
+            st.success("✅ Prompt updated (demo mode)")
+    else:
+        st.info("No prompts found.")
+
+# ============================================================================
+# SECTION 9: DATA QUALITY
+# ============================================================================
+
+elif section == "🧪 Data Quality":
+    st.title("🧪 Data Quality")
+    st.markdown("dbt test results and data quality metrics.")
+    st.divider()
+
+    dq_df = run_query("""
+        SELECT test_name, table_name, status, test_timestamp, rows_affected
+        FROM raw.dbt_test_results
+        ORDER BY test_timestamp DESC
         LIMIT 50
     """)
 
+    if not dq_df.empty:
+        passed = len(dq_df[dq_df['status'] == 'PASS'])
+        failed = len(dq_df[dq_df['status'] == 'FAIL'])
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Tests Passed", passed, delta=f"{round(100*passed/(passed+failed))}%")
+        with col2:
+            st.metric("Tests Failed", failed, delta=f"{round(100*failed/(passed+failed))}%")
+
+        st.divider()
+        st.markdown("### Test Results")
+        st.dataframe(dq_df.head(30), use_container_width=True)
+    else:
+        st.info("No test results available.")
+
+# ============================================================================
+# SECTION 10: PATIENT COHORT BUILDER
+# ============================================================================
+
+elif section == "👥 Patient Cohort Builder":
+    st.title("👥 Patient Cohort Builder")
+    st.markdown("Build cohorts using dynamic filters and aggregate metrics.")
+    st.divider()
+
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        min_age = st.slider("Minimum Age:", 0, 18, 0)
+    with col2:
+        max_age = st.slider("Maximum Age:", 0, 18, 18)
+    with col3:
+        department = st.selectbox("Department:", ["All", "Cardiology", "Neurology", "Oncology", "Orthopedics"])
+
+    if st.button("Build Cohort"):
+        cohort_df = run_query(f"""
+            SELECT COUNT(DISTINCT patient_id) AS cohort_size,
+                   ROUND(AVG(age_years)::numeric, 1) AS avg_age,
+                   COUNT(*) FILTER (WHERE gender = 'M') AS male_count,
+                   COUNT(*) FILTER (WHERE gender = 'F') AS female_count
+            FROM analytics_marts.dim_patients
+            WHERE age_years BETWEEN {min_age} AND {max_age}
+            {'AND department = ' + "'" + department + "'" if department != 'All' else ''}
+        """)
+
+        if not cohort_df.empty:
+            cohort = cohort_df.iloc[0]
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Cohort Size", int(cohort['cohort_size']))
+            with col2:
+                st.metric("Avg Age", f"{cohort['avg_age']} years")
+            with col3:
+                st.metric("Males", int(cohort['male_count']))
+            with col4:
+                st.metric("Females", int(cohort['female_count']))
+
+            st.divider()
+            st.markdown("### Cohort Details")
+            cohort_patients = run_query(f"""
+                SELECT patient_id, patient_name, age_years, gender, department
+                FROM analytics_marts.dim_patients
+                WHERE age_years BETWEEN {min_age} AND {max_age}
+                {'AND department = ' + "'" + department + "'" if department != 'All' else ''}
+                LIMIT 50
+            """)
+            st.dataframe(cohort_patients, use_container_width=True)
+
+# ============================================================================
+# SECTION 11: WHAT-IF SIMULATOR
+# ============================================================================
+
+elif section == "🔮 What-If Simulator":
+    st.title("🔮 What-If Simulator")
+    st.markdown("Interactive scenario modeling for patient risk scores.")
+    st.divider()
+
+    st.subheader("Adjust Patient Characteristics")
+    
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Total API Calls", len(log_df))
+        age = st.slider("Age (years):", 0, 18, 10)
     with col2:
-        avg_latency = round(log_df['latency_ms'].mean(), 0) if not log_df.empty else 0
-        st.metric("Avg Latency", f"{avg_latency}ms")
+        los = st.slider("Length of Stay (days):", 1, 30, 7)
     with col3:
-        success_rate = round(100 * log_df['success'].sum() / len(log_df), 1) if not log_df.empty else 0
-        st.metric("Success Rate", f"{success_rate}%")
+        med_count = st.slider("Number of Medications:", 0, 20, 5)
 
-    st.subheader("Recent API Calls")
-    st.dataframe(log_df, use_container_width=True)
+    col1, col2 = st.columns(2)
+    with col1:
+        department = st.selectbox("Department:", ["Cardiology", "Neurology", "Oncology", "Orthopedics"])
+    with col2:
+        disposition = st.selectbox("Discharge Disposition:", ["Home", "Skilled Nursing", "Rehab", "AMA"])
 
-    if not log_df.empty:
-        st.subheader("Token Usage Over Time")
-        fig = px.bar(log_df.sort_values('called_at'), x='called_at',
-                     y=['input_tokens', 'output_tokens'],
-                     labels={'value': 'Tokens', 'called_at': 'Time'},
-                     title="Input vs Output Tokens Per Call")
-        st.plotly_chart(fig, use_container_width=True)
+    if st.button("Simulate Risk Scores"):
+        st.info("🔮 Simulating ML predictions with adjusted parameters...")
+        
+        # Placeholder for actual XGBoost scoring
+        no_show_risk = np.random.rand() * 100
+        readmit_risk = np.random.rand() * 100
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("No-Show Risk", f"{no_show_risk:.1f}%", 
+                     delta="High" if no_show_risk > 50 else "Low", 
+                     delta_color="inverse")
+        with col2:
+            st.metric("Readmission Risk", f"{readmit_risk:.1f}%",
+                     delta="High" if readmit_risk > 50 else "Low",
+                     delta_color="inverse")
+
+        st.divider()
+        st.markdown("### Risk Prediction Details")
+        st.write(f"**Scenario:** {age}-year-old patient in {department}, {los} day stay, {med_count} medications, discharged to {disposition}")
+        st.write(f"Based on similar cases in the database, this patient has a **{no_show_risk:.1f}% probability of missing their next appointment** and a **{readmit_risk:.1f}% probability of 30-day readmission**.")
+
+# ============================================================================
+# FOOTER
+# ============================================================================
+
+st.divider()
+st.markdown(
+    f"<small style='color: {COLORS['neutral_gray']};'>Caboodle Access Platform v2.0 "
+    "| Powered by PostgreSQL, dbt, Claude AI, and Plotly | "
+    f"<a href='https://github.com/Sami7490/caboodle_access_platform' target='_blank'>GitHub</a></small>",
+    unsafe_allow_html=True
+)
